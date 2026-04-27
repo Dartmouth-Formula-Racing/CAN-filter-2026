@@ -31,20 +31,15 @@
 
 /* Private typedef -----------------------------------------------------------*/
 /* USER CODE BEGIN PTD */
-typedef union {
-    CAN_TxHeaderTypeDef TxHeader;
-    CAN_RxHeaderTypeDef RxHeader;
-} CAN_Header;
-
 typedef struct {
-    CAN_Header header;
+    CAN_RxHeaderTypeDef RxHeader;
     uint8_t data[8];
 } CAN_Frame;
 
 typedef struct {
     CAN_Frame buffer[CAN_BUFFER_SIZE];
-    uint16_t head;
-    uint16_t tail;
+    volatile uint16_t head;
+    volatile uint16_t tail;
 } CAN_Buffer;
 /* USER CODE END PTD */
 
@@ -58,8 +53,8 @@ CAN_HandleTypeDef hcan1;
 CAN_HandleTypeDef hcan2;
 
 /* USER CODE BEGIN PV */
-CAN_Buffer can1_buffer;
-CAN_Buffer can2_buffer;
+CAN_Buffer can1_buffer = {0};
+CAN_Buffer can2_buffer = {0};
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -75,6 +70,39 @@ static void MX_CAN2_Init(void);
 /* USER CODE BEGIN 0 */
 
 /* USER CODE END 0 */
+
+// forward one frame from src buffer to dst CAN, if Tx mailbox available
+// returns 1 if a frame was consumed, 0 if not so caller can stop draining
+static uint8_t forward_one(CAN_Buffer* src, CAN_HandleTypeDef* dst) {
+    if (src->head == src->tail) {
+        return 0; // empty
+    }
+
+    if (HAL_CAN_GetTxMailboxesFreeLevel(dst) == 0) {
+        return 0; // destination full, try again next iteration
+    }
+
+    CAN_Frame* frame = &src->buffer[src->tail];
+
+    // build a fresh Tx header from the captured Rx header
+    CAN_TxHeaderTypeDef TxHeader = {
+        .StdId              = frame->RxHeader.StdId,
+        .ExtId              = frame->RxHeader.ExtId,
+        .IDE                = frame->RxHeader.IDE,
+        .RTR                = frame->RxHeader.RTR,
+        .DLC                = frame->RxHeader.DLC,
+        .TransmitGlobalTime = DISABLE,
+    };
+
+    uint32_t mailbox;
+    if (HAL_CAN_AddTxMessage(dst, &TxHeader, frame->data, &mailbox) != HAL_OK) {
+        return 0; // leave entry in the buffer, retry next loop
+    }
+
+    // only advance tail after a successful queue
+    src->tail = (uint16_t)((src->tail + 1u) % CAN_BUFFER_SIZE);
+    return 1;
+}
 
 /**
  * @brief  The application entry point.
@@ -112,31 +140,10 @@ int main(void) {
     /* Infinite loop */
     /* USER CODE BEGIN WHILE */
     while (1) {
-        uint32_t mailbox;
-
-        // Empty CAN1 RX buffer
-        while (can1_buffer.head != can1_buffer.tail) {
-            CAN_Frame* frame = &can1_buffer.buffer[can1_buffer.tail];
-
-            // Forward to CAN2
-            if (HAL_CAN_GetTxMailboxesFreeLevel(&hcan2) != 0) {
-                HAL_CAN_AddTxMessage(&hcan2, &frame->header.TxHeader, frame->data, &mailbox);
-            }
-
-            can1_buffer.tail = (can1_buffer.tail + 1) % CAN_BUFFER_SIZE;
-        }
-
-        // Empty CAN2 RX buffer
-        while (can2_buffer.head != can2_buffer.tail) {
-            CAN_Frame* frame = &can2_buffer.buffer[can2_buffer.tail];
-
-            // Forward to CAN1
-            if (HAL_CAN_GetTxMailboxesFreeLevel(&hcan1) != 0) {
-                HAL_CAN_AddTxMessage(&hcan1, &frame->header.TxHeader, frame->data, &mailbox);
-            }
-
-            can2_buffer.tail = (can2_buffer.tail + 1) % CAN_BUFFER_SIZE;
-        }
+        // drain both directions
+        // each call forwards at most one frame and only advances tail on success
+        while (forward_one(&can1_buffer, &hcan2)) { }
+        while (forward_one(&can2_buffer, &hcan1)) { }
         /* USER CODE END WHILE */
 
         /* USER CODE BEGIN 3 */
@@ -214,7 +221,7 @@ static void MX_CAN1_Init(void) {
         Error_Handler();
     }
     /* USER CODE BEGIN CAN1_Init 2 */
-    for (uint8_t i = 0; i < 28; i++) {
+    for (uint8_t i = 0; i < 14; i++) {
         CAN_FilterTypeDef can_filter;
         can_filter.FilterBank = i;
         can_filter.FilterMode = CAN_FILTERMODE_IDMASK;
@@ -269,7 +276,7 @@ static void MX_CAN2_Init(void) {
     }
     /* USER CODE BEGIN CAN2_Init 2 */
 
-    for (uint8_t i = 0; i < 28; i++) {
+    for (uint8_t i = 14; i < 28; i++) {
         CAN_FilterTypeDef can_filter;
         can_filter.FilterBank = i;
         can_filter.FilterMode = CAN_FILTERMODE_IDMASK;
@@ -354,32 +361,39 @@ static void MX_GPIO_Init(void) {
 
 /* USER CODE BEGIN 4 */
 void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef* hcan) {
+    CAN_Buffer* buf;
     if (hcan->Instance == CAN1) {
-        CAN_RxHeaderTypeDef RxHeader;
-        uint8_t data[8];
-
-        if (HAL_CAN_GetRxMessage(hcan, CAN_RX_FIFO0, &RxHeader, data) == HAL_OK) {
-            if (can1_buffer.head < CAN_BUFFER_SIZE) {
-                can1_buffer.buffer[can1_buffer.head].header.RxHeader = RxHeader;
-                for (int i = 0; i < 8; i++) {
-                    can1_buffer.buffer[can1_buffer.head].data[i] = data[i];
-                }
-                can1_buffer.head++;
-            }
-        }
+        buf = &can1_buffer;
     } else if (hcan->Instance == CAN2) {
-        CAN_RxHeaderTypeDef RxHeader;
-        uint8_t data[8];
+        buf = &can2_buffer;
+    } else {
+        return;
+    }
 
-        if (HAL_CAN_GetRxMessage(hcan, CAN_RX_FIFO0, &RxHeader, data) == HAL_OK) {
-            if (can2_buffer.head < CAN_BUFFER_SIZE) {
-                can2_buffer.buffer[can2_buffer.head].header.RxHeader = RxHeader;
-                for (int i = 0; i < 8; i++) {
-                    can2_buffer.buffer[can2_buffer.head].data[i] = data[i];
-                }
-                can2_buffer.head++;
-            }
+    CAN_RxHeaderTypeDef RxHeader;
+    uint8_t data[8];
+
+    // bxCAN RX FIFO is 3 deep, drain until empty
+    while (HAL_CAN_GetRxFifoFillLevel(hcan, CAN_RX_FIFO0) > 0) {
+        if (HAL_CAN_GetRxMessage(hcan, CAN_RX_FIFO0, &RxHeader, data) != HAL_OK) {
+            return;
         }
+
+        uint16_t head = buf->head;
+        uint16_t next = (uint16_t)((head + 1u) % CAN_BUFFER_SIZE);
+
+        // if  buffer is full, drop this frame rather than overwrite an unread one
+        if (next == buf->tail) {
+            return;
+        }
+
+        buf->buffer[head].RxHeader = RxHeader;
+        for (int i = 0; i < 8; i++) {
+            buf->buffer[head].data[i] = data[i];
+        }
+
+        // publish new head after the data is written
+        buf->head = next;
     }
 }
 
