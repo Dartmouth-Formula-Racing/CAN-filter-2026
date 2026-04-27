@@ -21,7 +21,12 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-#define CAN_BUFFER_SIZE 64
+#define CAN_BUFFER_SIZE 256u
+#define CAN_BUFFER_MASK (CAN_BUFFER_SIZE - 1u)
+
+#if ((CAN_BUFFER_SIZE & CAN_BUFFER_MASK) != 0u)
+#error "CAN_BUFFER_SIZE must be a power-of-two"
+#endif
 /* USER CODE END PD */
 
 /* Private includes ----------------------------------------------------------*/
@@ -100,7 +105,7 @@ static uint8_t forward_one(CAN_Buffer* src, CAN_HandleTypeDef* dst) {
     }
 
     // only advance tail after a successful queue
-    src->tail = (uint16_t)((src->tail + 1u) % CAN_BUFFER_SIZE);
+    src->tail = (uint16_t)((src->tail + 1u) & CAN_BUFFER_MASK);
     return 1;
 }
 
@@ -380,7 +385,7 @@ void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef* hcan) {
         }
 
         uint16_t head = buf->head;
-        uint16_t next = (uint16_t)((head + 1u) % CAN_BUFFER_SIZE);
+        uint16_t next = (uint16_t)((head + 1u) & CAN_BUFFER_MASK);
 
         // if  buffer is full, drop this frame rather than overwrite an unread one
         if (next == buf->tail) {
