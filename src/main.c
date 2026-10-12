@@ -74,7 +74,7 @@ static const CAN_FilterId can1_whitelist[] = {
     {CAN_ID_EXT, 0x18FF50E5u},
     {CAN_ID_EXT, 0x18000002u},
     {CAN_ID_EXT, 0x18000000u},
-    {CAN_ID_STD, 0u}, // end of list
+    {CAN_ID_STD, 0u}, // end of list DO NOT REMOVE
 };
 #define CAN1_WHITELIST_COUNT ((sizeof(can1_whitelist) / sizeof(can1_whitelist[0])) - 1u)
 _Static_assert(CAN1_WHITELIST_COUNT > 0u, "Add CAN1 whitelist IDs before enabling the whitelist");
@@ -250,7 +250,7 @@ static void MX_CAN1_Init(void) {
     hcan1.Init.AutoWakeUp = ENABLE;
     hcan1.Init.AutoRetransmission = ENABLE;
     hcan1.Init.ReceiveFifoLocked = DISABLE;
-    hcan1.Init.TransmitFifoPriority = DISABLE;
+    hcan1.Init.TransmitFifoPriority = ENABLE;
     if (HAL_CAN_Init(&hcan1) != HAL_OK) {
         Error_Handler();
     }
@@ -340,7 +340,7 @@ static void MX_CAN2_Init(void) {
     hcan2.Init.AutoWakeUp = ENABLE;
     hcan2.Init.AutoRetransmission = ENABLE;
     hcan2.Init.ReceiveFifoLocked = DISABLE;
-    hcan2.Init.TransmitFifoPriority = DISABLE;
+    hcan2.Init.TransmitFifoPriority = ENABLE;
     if (HAL_CAN_Init(&hcan2) != HAL_OK) {
         Error_Handler();
     }
