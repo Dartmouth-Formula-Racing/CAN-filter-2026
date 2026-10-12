@@ -24,6 +24,9 @@
 #define CAN_BUFFER_SIZE 256u
 #define CAN_BUFFER_MASK (CAN_BUFFER_SIZE - 1u)
 
+#define CAN1_WHITELIST_ENABLED 1u
+#define CAN1_FILTER_BANK_COUNT 14u
+
 #if ((CAN_BUFFER_SIZE & CAN_BUFFER_MASK) != 0u)
 #error "CAN_BUFFER_SIZE must be a power-of-two"
 #endif
@@ -46,6 +49,11 @@ typedef struct {
     volatile uint16_t head;
     volatile uint16_t tail;
 } CAN_Buffer;
+
+typedef struct {
+    uint32_t IDE;
+    uint32_t Id;
+} CAN_FilterId;
 /* USER CODE END PTD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -60,6 +68,18 @@ CAN_HandleTypeDef hcan2;
 /* USER CODE BEGIN PV */
 CAN_Buffer can1_buffer = {0};
 CAN_Buffer can2_buffer = {0};
+
+#if CAN1_WHITELIST_ENABLED
+static const CAN_FilterId can1_whitelist[] = {
+    {CAN_ID_EXT, 0x18FF50E5u},
+    {CAN_ID_EXT, 0x18000002u},
+    {CAN_ID_EXT, 0x18000000u},
+    {CAN_ID_STD, 0u}, // end of list
+};
+#define CAN1_WHITELIST_COUNT ((sizeof(can1_whitelist) / sizeof(can1_whitelist[0])) - 1u)
+_Static_assert(CAN1_WHITELIST_COUNT > 0u, "Add CAN1 whitelist IDs before enabling the whitelist");
+_Static_assert(CAN1_WHITELIST_COUNT <= CAN1_FILTER_BANK_COUNT * 2, "CAN1 whitelist exceeds its allocated filter banks");
+#endif
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -73,6 +93,15 @@ static void MX_CAN2_Init(void);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+#if CAN1_WHITELIST_ENABLED
+// Refer to RM0090 section 32.9.3 for id register layout (STID vs EXID)
+static uint32_t can_filter_encode_id(const CAN_FilterId* id) {
+    if (id->IDE == CAN_ID_STD) { // for st ids, shift it into the 11 MSBs
+        return id->Id << 21;
+    }
+    return (id->Id << 3) | CAN_ID_EXT; // for ex ids, shift it into the 29 MSBs and set the IDE bit
+}
+#endif
 
 /* USER CODE END 0 */
 
@@ -226,7 +255,43 @@ static void MX_CAN1_Init(void) {
         Error_Handler();
     }
     /* USER CODE BEGIN CAN1_Init 2 */
-    for (uint8_t i = 0; i < 14; i++) {
+    // CAN1 has whitelist, so messages filtered can1->can2, but all allowed can2->can1
+#if CAN1_WHITELIST_ENABLED
+    for (uint8_t i = 0; i < (CAN1_WHITELIST_COUNT + 1) / 2; i++) {
+        const CAN_FilterId* id1 = &can1_whitelist[i * 2];
+        const CAN_FilterId* id2 = &can1_whitelist[i * 2 + 1u];
+        if (i == (CAN1_WHITELIST_COUNT / 2)) { // if odd number of whitelist entries, last filter bank gets a duplicate
+            id2 = id1;
+        }
+        uint32_t max_id1 = (id1->IDE == CAN_ID_STD) ? 0x7FFu : 0x1FFFFFFFu;
+        uint32_t max_id2 = (id2->IDE == CAN_ID_STD) ? 0x7FFu : 0x1FFFFFFFu;
+        if ((id1->IDE != CAN_ID_STD && id1->IDE != CAN_ID_EXT) || (id2->IDE != CAN_ID_STD && id2->IDE != CAN_ID_EXT) || id1->Id > max_id1 || id2->Id > max_id2) {
+            Error_Handler();
+        }
+
+        uint32_t encoded_id1 = can_filter_encode_id(id1);
+        uint32_t encoded_id2 = can_filter_encode_id(id2);
+        CAN_FilterTypeDef can_filter;
+        can_filter.FilterBank = i;
+        can_filter.FilterMode = CAN_FILTERMODE_IDLIST;
+        can_filter.FilterScale = CAN_FILTERSCALE_32BIT;
+        can_filter.FilterIdHigh = (encoded_id1 >> 16) & 0xFFFFu;
+        can_filter.FilterIdLow = encoded_id1 & 0xFFFFu;
+        can_filter.FilterMaskIdHigh = (encoded_id2 >> 16) & 0xFFFFu;
+        can_filter.FilterMaskIdLow = encoded_id2 & 0xFFFFu;
+        can_filter.FilterFIFOAssignment = CAN_RX_FIFO0;
+        can_filter.FilterActivation = ENABLE;
+        can_filter.SlaveStartFilterBank = 14;
+        if (HAL_CAN_ConfigFilter(&hcan1, &can_filter) != HAL_OK) {
+            Error_Handler();
+        }
+    }
+    uint32_t filter_activation_mode = DISABLE;
+    for (uint8_t i = (CAN1_WHITELIST_COUNT + 1) / 2; i < CAN1_FILTER_BANK_COUNT; i++) { // remaining filter banks get deactivated
+#else
+    uint32_t filter_activation_mode = ENABLE;
+    for (uint8_t i = 0; i < CAN1_FILTER_BANK_COUNT; i++) { // all filter banks get deactivated (allow anything)
+#endif
         CAN_FilterTypeDef can_filter;
         can_filter.FilterBank = i;
         can_filter.FilterMode = CAN_FILTERMODE_IDMASK;
@@ -236,7 +301,7 @@ static void MX_CAN1_Init(void) {
         can_filter.FilterMaskIdHigh = 0x0000;
         can_filter.FilterMaskIdLow = 0x0000;
         can_filter.FilterFIFOAssignment = CAN_RX_FIFO0;
-        can_filter.FilterActivation = ENABLE;
+        can_filter.FilterActivation = filter_activation_mode;
         can_filter.SlaveStartFilterBank = 14;
         if (HAL_CAN_ConfigFilter(&hcan1, &can_filter) != HAL_OK) {
             Error_Handler();
